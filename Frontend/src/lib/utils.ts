@@ -56,7 +56,8 @@ export const formatMessageTime = (date: Date) => {
   } else if (date.getFullYear() === now.getFullYear()) {
     return `${date.getDate()}/${date.getMonth() + 1} ${timeStr}`; // ví dụ: "22/9 09:15"
   } else {
-    return `${date.getDate()}/${date.getMonth() + 1
-      }/${date.getFullYear()} ${timeStr}`; // ví dụ: "15/12/2023 18:40"
+    return `${date.getDate()}/${
+      date.getMonth() + 1
+    }/${date.getFullYear()} ${timeStr}`; // ví dụ: "15/12/2023 18:40"
   }
 };

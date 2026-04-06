@@ -3,176 +3,236 @@ import type { ChatState } from "@/types/store";
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import { useAuthStore } from "./useAuthStore";
+import { useSocketStore } from "./useSocketStore";
 
 export const useChatStore = create<ChatState>()(
-  persist((set, get) => ({
-    conversations: [],
-    messages: {},
-    activeConversationId: null,
-    convoLoading: false,//convo loading
-    messageLoading: false,
+  persist(
+    (set, get) => ({
+      conversations: [],
+      messages: {},
+      activeConversationId: null,
+      convoLoading: false, // convo loading
+      messageLoading: false,
+      loading: false,
 
-    setActiveConversation: (id) => set({ activeConversationId: id }),
-    reset: () => {
-      set({
-        conversations: [],
-        messages: {},
-        activeConversationId: null,
-        convoLoading: false,
-        messageLoading: false
-      })
-    },
-    fetchConversation: async () => {
-      try {
-        set({ convoLoading: true })
-        const { conversations } = await chatService.fetchConversation()
-        set({ conversations, convoLoading: false })
-      } catch (error) {
-        console.log("loi khi call fetConversation:", error)
-        set({ convoLoading: false })
-      }
-    },
-    fetchMessages: async (conversationId) => {
-      const { activeConversationId, messages } = get();
-      const { user } = useAuthStore.getState();
+      setActiveConversation: (id) => set({ activeConversationId: id }),
+      reset: () => {
+        set({
+          conversations: [],
+          messages: {},
+          activeConversationId: null,
+          convoLoading: false,
+          messageLoading: false,
+        });
+      },
+      fetchConversations: async () => {
+        try {
+          set({ convoLoading: true });
+          const { conversations } = await chatService.fetchConversations();
 
-      const convoId = conversationId ?? activeConversationId;
+          set({ conversations, convoLoading: false });
+        } catch (error) {
+          console.error("Lỗi xảy ra khi fetchConversations:", error);
+          set({ convoLoading: false });
+        }
+      },
+      fetchMessages: async (conversationId) => {
+        const { activeConversationId, messages } = get();
+        const { user } = useAuthStore.getState();
 
-      if (!convoId) return;
+        const convoId = conversationId ?? activeConversationId;
 
-      const current = messages?.[convoId];
-      const nextCursor =
-        current?.nextCursor === undefined ? "" : current?.nextCursor;
+        if (!convoId) return;
 
-      if (nextCursor === null) return;
+        const current = messages?.[convoId];
+        const nextCursor =
+          current?.nextCursor === undefined ? "" : current?.nextCursor;
 
-      set({ messageLoading: true });
+        if (nextCursor === null) return;
 
-      try {
-        const { messages: fetched, cursor } = await chatService.fetchMessages(
-          convoId,
-          nextCursor
-        );
+        set({ messageLoading: true });
 
-        const processed = fetched.map((m) => ({
-          ...m,
-          isOwn: m.senderId === user?._id,
+        try {
+          const { messages: fetched, cursor } = await chatService.fetchMessages(
+            convoId,
+            nextCursor
+          );
+
+          const processed = fetched.map((m) => ({
+            ...m,
+            isOwn: m.senderId === user?._id,
+          }));
+
+          set((state) => {
+            const prev = state.messages[convoId]?.items ?? [];
+            const merged = prev.length > 0 ? [...processed, ...prev] : processed;
+
+            return {
+              messages: {
+                ...state.messages,
+                [convoId]: {
+                  items: merged,
+                  hasMore: !!cursor,
+                  nextCursor: cursor ?? null,
+                },
+              },
+            };
+          });
+        } catch (error) {
+          console.error("Lỗi xảy ra khi fetchMessages:", error);
+        } finally {
+          set({ messageLoading: false });
+        }
+      },
+      sendDirectMessage: async (recipientId, content, imgUrl) => {
+        try {
+          const { activeConversationId } = get();
+          await chatService.sendDirectMessage(
+            recipientId,
+            content,
+            imgUrl,
+            activeConversationId || undefined
+          );
+          set((state) => ({
+            conversations: state.conversations.map((c) =>
+              c._id === activeConversationId ? { ...c, seenBy: [] } : c
+            ),
+          }));
+        } catch (error) {
+          console.error("Lỗi xảy ra khi gửi direct message", error);
+        }
+      },
+      sendGroupMessage: async (conversationId, content, imgUrl) => {
+        try {
+          await chatService.sendGroupMessage(conversationId, content, imgUrl);
+          set((state) => ({
+            conversations: state.conversations.map((c) =>
+              c._id === get().activeConversationId ? { ...c, seenBy: [] } : c
+            ),
+          }));
+        } catch (error) {
+          console.error("Lỗi xảy ra gửi group message", error);
+        }
+      },
+      addMessage: async (message) => {
+        try {
+          const { user } = useAuthStore.getState();
+          const { fetchMessages } = get();
+
+          message.isOwn = message.senderId === user?._id;
+
+          const convoId = message.conversationId;
+
+          let prevItems = get().messages[convoId]?.items ?? [];
+
+          if (prevItems.length === 0) {
+            await fetchMessages(message.conversationId);
+            prevItems = get().messages[convoId]?.items ?? [];
+          }
+
+          set((state) => {
+            if (prevItems.some((m) => m._id === message._id)) {
+              return state;
+            }
+
+            return {
+              messages: {
+                ...state.messages,
+                [convoId]: {
+                  items: [...prevItems, message],
+                  hasMore: state.messages[convoId].hasMore,
+                  nextCursor: state.messages[convoId].nextCursor ?? undefined,
+                },
+              },
+            };
+          });
+        } catch (error) {
+          console.error("Lỗi xảy khi ra add message:", error);
+        }
+      },
+      updateConversation: (conversation) => {
+        set((state) => ({
+          conversations: state.conversations.map((c) =>
+            c._id === conversation._id ? { ...c, ...conversation } : c
+          ),
         }));
+      },
+      markAsSeen: async () => {
+        try {
+          const { user } = useAuthStore.getState();
+          const { activeConversationId, conversations } = get();
 
+          if (!activeConversationId || !user) {
+            return;
+          }
+
+          const convo = conversations.find((c) => c._id === activeConversationId);
+
+          if (!convo) {
+            return;
+          }
+
+          if ((convo.unreadCounts?.[user._id] ?? 0) === 0) {
+            return;
+          }
+
+          await chatService.markAsSeen(activeConversationId);
+
+          set((state) => ({
+            conversations: state.conversations.map((c) =>
+              c._id === activeConversationId && c.lastMessage
+                ? {
+                    ...c,
+                    unreadCounts: {
+                      ...c.unreadCounts,
+                      [user._id]: 0,
+                    },
+                  }
+                : c
+            ),
+          }));
+        } catch (error) {
+          console.error("Lỗi xảy ra khi gọi markAsSeen trong store", error);
+        }
+      },
+      addConvo: (convo) => {
         set((state) => {
-          const prev = state.messages[convoId]?.items ?? [];
-          const merged = prev.length > 0 ? [...processed, ...prev] : processed;
+          const exists = state.conversations.some(
+            (c) => c._id.toString() === convo._id.toString()
+          );
 
           return {
-            messages: {
-              ...state.messages,
-              [convoId]: {
-                items: merged,
-                hasMore: !!cursor,
-                nextCursor: cursor ?? null,
-              },
-            },
+            conversations: exists
+              ? state.conversations
+              : [convo, ...state.conversations],
+            activeConversationId: convo._id,
           };
         });
-      } catch (error) {
-        console.error("Lỗi xảy ra khi fetchMessages:", error);
-      } finally {
-        set({ messageLoading: false });
-      }
-    },
-    sendDirectMessage: async (recipientId, content, imgUrl) => {
-      try {
-        const { activeConversationId } = get()
-        await chatService.sendDirectMessage(recipientId, content, imgUrl, activeConversationId || undefined)
-        set((state) => ({
-          conversations: state.conversations.map((c) => c._id === activeConversationId ? { ...c, seenBy: [] } : c)
-        }))
-      } catch (error) {
-        console.error("loi xay ra khi gui directmessage", error)
-      }
-    },
-    sendGroupMessage: async (conversationId, content, imgUrl) => {
-      try {
-        await chatService.sendGroupMessage(conversationId, content, imgUrl);
-        set((state) => ({
-          conversations: state.conversations.map((c) => c._id === get().activeConversationId ? { ...c, seenBy: [] } : c)
-        }))
-      } catch (error) {
-        console.error("loi xay ra khi gui groupmessage", error)
-      }
-    },
-    addMessage: async (message) => {
-      try {
-        const { user } = useAuthStore.getState()
-        const { fetchMessages } = get()
+      },
+      createConversation: async (type, name, memberIds) => {
+        try {
+          set({ loading: true });
+          const conversation = await chatService.createConversation(
+            type,
+            name,
+            memberIds
+          );
 
-        message.isOwn = message.senderId === user?._id
+          get().addConvo(conversation);
 
-        const convoId = message.conversationId
-
-        let prevItems = get().messages[convoId]?.items ?? []
-        if (prevItems.length === 0) {
-          await fetchMessages(message.conversationId)
-          prevItems = get().messages[convoId]?.items ?? []
+          useSocketStore
+            .getState()
+            .socket?.emit("join-conversation", conversation._id);
+        } catch (error) {
+          console.error("Lỗi xảy ra khi gọi createConversation trong store", error);
+        } finally {
+          set({ loading: false });
         }
-
-        set((state) => {
-          if (prevItems.some((m) => m._id === message._id)) return state
-          return {
-            messages: {
-              ...state.messages,
-              [convoId]: {
-                items: [...prevItems, message],
-                hasMore: state.messages[convoId].hasMore,
-                nextCursor: state.messages[convoId].nextCursor ?? undefined
-              }
-            }
-          }
-        })
-
-      } catch (error) {
-        console.error("Loi xay ra khi add message", error)
-      }
-    },
-    updateConversation: async (conversation) => {
-      set((state) => ({
-        conversations: state.conversations.map((c) => c._id === conversation._id ? { ...c, ...conversation } : c)
-      }))
-    },
-    markAsSeen: async () => {
-      try {
-        const { user } = useAuthStore.getState()
-        const { activeConversationId, conversations } = get()
-        if (!activeConversationId || !user) return
-
-        const convo = conversations.find((c) => c._id === activeConversationId)
-        if (!convo) return
-        if ((convo.unreadCounts?.[user._id] ?? 0) === 0) return
-
-        await chatService.markAsSeen(activeConversationId);
-        set((state) => (
-          {
-            conversations: state.conversations.map((c) => (
-              c._id === activeConversationId && c.lastMessage ? {
-                ...c,
-                unreadCounts: {
-                  ...c.unreadCounts,
-                  [user._id]: 0
-                }
-              }
-                : c
-            ))
-          }
-        ))
-      } catch (error) {
-        console.error("loi khi goi markAsSeen trong store", error)
-      }
-    },
-  }), {
-    name: "chat-storage",
-    partialize: (state) => ({
-      conversations: state.conversations,
-      activeConversationId: state.activeConversationId,
+      },
     }),
-  })
-)
+    {
+      name: "chat-storage",
+      partialize: (state) => ({ conversations: state.conversations }),
+    }
+  )
+);
